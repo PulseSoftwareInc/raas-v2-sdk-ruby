@@ -26,23 +26,44 @@ module Raas
     end
 
     def execute_request(request, binary: false, name: nil)
-      @logger.info("Calling the on_before_request method of http_call_back for #{name}.") if @http_call_back
-      @http_call_back.on_before_request(request) if @http_call_back
+      retries = 0
 
-      @logger.info("Merging global headers with endpoint headers for #{name}.")
-      APIHelper.clean_hash(request.headers)
-      request.headers = @@global_headers.clone.merge(request.headers)
+      begin
+        @logger.info("Calling the on_before_request method of http_call_back for #{name}.") if @http_call_back
+        @http_call_back.on_before_request(request) if @http_call_back
 
-      @logger.debug("Raw request for #{name} is: #{request.inspect}")
-      response = binary ? @http_client.execute_as_binary(request) : @http_client.execute_as_string(request)
-      @logger.debug("Raw response for #{name} is: #{response.inspect}")
-      @logger.info("Wrapping request and response in a context object for #{name}.")
-      context = HttpContext.new(request, response)
+        @logger.info("Merging global headers with endpoint headers for #{name}.")
+        APIHelper.clean_hash(request.headers)
+        request.headers = @@global_headers.clone.merge(request.headers)
 
-      @logger.info("Calling on_after_response method of http_call_back for #{name}.") if @http_call_back
-      @http_call_back.on_after_response(context) if @http_call_back
+        @logger.debug("Raw request for #{name} is: #{request.inspect}")
+        response = binary ? @http_client.execute_as_binary(request) : @http_client.execute_as_string(request)
+        @logger.debug("Raw response for #{name} is: #{response.inspect}")
+        @logger.info("Wrapping request and response in a context object for #{name}.")
+        context = HttpContext.new(request, response)
 
-      return context
+        raise APIException.new("", context) if (500..599).include? context.response.status_code
+
+        @logger.info("Calling on_after_response method of http_call_back for #{name}.") if @http_call_back
+        @http_call_back.on_after_response(context) if @http_call_back
+      rescue APIException
+        retries += 1
+
+        @logger.error("Error when executing request on attempt ##{retries}.")
+        @logger.error("Response code was #{context.response.status_code}.")
+        @logger.error("Response:\n#{JSON.parse(context.response.raw_body)}")
+
+        case retries
+        when 1,2,3
+          sleep 1
+        when 4,5
+          sleep 3
+        end
+
+        retry if retries < 5
+      ensure
+        return context
+      end
     end
 
     def validate_response(context)
